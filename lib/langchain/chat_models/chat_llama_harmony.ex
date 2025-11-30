@@ -120,6 +120,7 @@ defmodule LangChain.ChatModels.ChatLlamaHarmony do
     # Prepare request payload
     payload =
       %{
+        model: model.model,
         prompt: harmony_prompt,
         stream: model.stream,
         max_tokens: model.max_tokens,
