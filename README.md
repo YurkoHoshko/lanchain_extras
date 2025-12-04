@@ -29,9 +29,13 @@ alias LangChain.Message
 
 {:ok, llm} =
   ChatLlamaHarmony.new(%{
-    endpoint: "http://localhost:8000/v1/completions",
-    model: "llama-3.1-8b",
-    stream: true
+    # llama-swap raw completions endpoint (mapped host 8000 -> container 8080 in compose)
+    endpoint: "http://localhost:8000/completion",
+    # model is forwarded to llama-swap for routing
+    model: "gpt-oss-20b",
+    stream: true,
+    # max_tokens is sent as n_predict to llama.cpp
+    max_tokens: 256
   })
 
 messages = [
@@ -43,7 +47,23 @@ messages = [
 IO.inspect(replies, label: "llama.cpp replies")
 ```
 
-Swap in `ChatLlamaJinja` to use the Qwen 3 Jinja template; both models support tool calls and JSON-mode parsing.
+Swap in `ChatLlamaJinja` to use the Qwen 3 Jinja template; both models support tool calls and JSON-mode parsing against the same `/completion` endpoint.
+
+## End-to-end examples
+
+Two runnable scripts live in `examples/` (use your llama-swap model names):
+
+```bash
+# Harmony (OpenAI Harmony prompt)
+LLAMA_SWAP_URL=http://localhost:8000/completion \
+LLAMA_SWAP_MODEL=gpt-oss-20b \
+mix run examples/harmony_demo.exs
+
+# Jinja (Qwen 3 template)
+LLAMA_SWAP_URL=http://localhost:8000/completion \
+LLAMA_SWAP_MODEL=qwen3-coder.gguf \
+mix run examples/jinja_demo.exs
+```
 
 ## Developing
 

@@ -71,7 +71,7 @@ defmodule LangChain.ChatModels.ChatLlamaHarmonyTest do
 
   describe "call/3" do
     test "attempts to make HTTP request and fails with connection error" do
-      model = ChatLlamaHarmony.new!()
+      model = ChatLlamaHarmony.new!(%{endpoint: "http://127.0.0.1:9"})
       {:error, %Req.TransportError{reason: :econnrefused}} = ChatLlamaHarmony.call(model, [], [])
     end
   end

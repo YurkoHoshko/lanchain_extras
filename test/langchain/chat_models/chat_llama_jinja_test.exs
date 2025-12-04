@@ -26,7 +26,7 @@ defmodule LangChain.ChatModels.ChatLlamaJinjaTest do
 
   describe "call/3" do
     test "returns error when endpoint unavailable" do
-      model = ChatLlamaJinja.new!()
+      model = ChatLlamaJinja.new!(%{endpoint: "http://127.0.0.1:9"})
       {:error, %Req.TransportError{reason: :econnrefused}} = ChatLlamaJinja.call(model, [], [])
     end
   end

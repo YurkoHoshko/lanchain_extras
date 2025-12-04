@@ -29,7 +29,8 @@ defmodule LangchainExtras.MixProject do
       {:ecto, "~> 3.10"},
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:bypass, "~> 2.1", only: :test}
     ]
   end
 

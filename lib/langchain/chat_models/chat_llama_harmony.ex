@@ -120,10 +120,12 @@ defmodule LangChain.ChatModels.ChatLlamaHarmony do
     # Prepare request payload
     payload =
       %{
+        # llama-swap raw completions route still accepts model for routing
         model: model.model,
         prompt: harmony_prompt,
         stream: model.stream,
-        max_tokens: model.max_tokens,
+        # llama.cpp /completion expects n_predict instead of OpenAI's max_tokens
+        n_predict: model.max_tokens,
         temperature: model.temperature,
         seed: model.seed,
         top_p: model.top_p,
@@ -298,6 +300,20 @@ defmodule LangChain.ChatModels.ChatLlamaHarmony do
       {:ok, %{"choices" => [%{"text" => text}]}} ->
         {:text, text}
 
+      # llama.cpp /completion streaming shape
+      {:ok, %{"content" => _text, "stop" => true}} ->
+        {:done, :stop}
+
+      {:ok, %{"content" => text}} when is_binary(text) ->
+        {:text, text}
+
+      {:ok, %{"token" => %{"text" => text}, "stop" => stop}}
+      when is_binary(text) and stop in [false, nil] ->
+        {:text, text}
+
+      {:ok, %{"token" => %{"text" => _text}, "stop" => true}} ->
+        {:done, :stop}
+
       _ ->
         :skip
     end
@@ -398,10 +414,31 @@ defmodule LangChain.ChatModels.ChatLlamaHarmony do
         _ -> false
       end)
 
-    if filtered == [] do
-      messages
-    else
-      filtered
+    cond do
+      filtered != [] ->
+        filtered
+
+      # Only analysis messages present: promote the last one to final so callers always get an answer
+      messages != [] ->
+        messages
+        |> Enum.reverse()
+        |> Enum.find(fn %Message{metadata: meta} ->
+          match?(%{channel: "analysis"}, meta)
+        end)
+        |> case do
+          nil ->
+            messages
+
+          %Message{} = analysis_msg ->
+            promoted =
+              analysis_msg
+              |> Map.update(:metadata, %{}, fn meta -> Map.drop(meta, [:channel]) end)
+
+            [promoted]
+        end
+
+      true ->
+        []
     end
   end
 
