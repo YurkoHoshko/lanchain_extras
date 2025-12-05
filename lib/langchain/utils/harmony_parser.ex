@@ -1,130 +1,80 @@
 defmodule LangChain.Utils.HarmonyParser do
   @moduledoc """
-  Parses OpenAI Harmony response format from streamed tokens.
+  NimbleParsec-based parser for OpenAI Harmony message format.
 
-  1. Use STREAMING REQ; 2. leverage known tokens to parse streamed tokens.
+  What it handles
+  ---------------
+  * `<|start|>...<|message|>...<|end|>` message framing
+  * Optional channel (`<|channel|>`), recipient (`to=`) and content type (`<|constrain|>`)
+  * Stop markers `<|call|>`, `<|return|>`, `<|end|>` mapped to `:tool_call` / `:final_response`
 
-  Handles the special tokens and structure defined in the Harmony specification
-  to extract messages, tool calls, and channel information from llama.cpp responses.
+  How it is structured
+  --------------------
+  * **Header combinator** (`header`): parses role + optional channel / recipient / content_type.
+  * **Content combinator** (`content`): consumes UTF‑8 until a stop tag is seen.
+  * **Stop combinator** (`stop_token`): captures which terminal token closed the message.
+  * **Message combinator** (`message`): `<|start|>` + header + `<|message|>` + content + stop.
+  * **message_list**: top-level parser; `process_text/2` reuses it for streaming buffers.
+
+  Streaming use
+  -------------
+  Call `process_text/2` with new chunks; completed messages accumulate on `parser.messages`,
+  and any trailing partial message remains in `parser.buffer`.
   """
 
   require Logger
+  import NimbleParsec
 
-  @header_regex ~r/^(?<role>[^\s<]+)(?:<\|channel\|>(?<channel>[^\s<]+))?(?:\s+to=(?<recipient>[^\s<]+))?(?:\s*<\|constrain\|>(?<content_type>[^\s<]+))?/
+  defstruct [:buffer, :messages]
 
-  defstruct [
-    :buffer,
-    :messages,
-    :in_message,
-    :parsing_header,
-    :current_role,
-    :current_channel,
-    :current_content,
-    :current_recipient,
-    :current_content_type
-  ]
+  @start "<|start|>"
+  @message "<|message|>"
+  @channel "<|channel|>"
+  @constrain "<|constrain|>"
+  @call "<|call|>"
+  @return "<|return|>"
+  @end_token "<|end|>"
+
+  # ---------- Public API ----------
 
   @doc """
   Creates a new streaming parser instance with initial state.
   """
   @spec new() :: %__MODULE__{}
-  def new() do
-    %__MODULE__{
-      buffer: "",
-      messages: [],
-      in_message: false,
-      parsing_header: false,
-      current_role: nil,
-      current_channel: nil,
-      current_content: nil,
-      current_recipient: nil,
-      current_content_type: nil
-    }
-  end
+  def new, do: %__MODULE__{buffer: "", messages: []}
 
   @doc """
   Parses a complete Harmony response string into messages.
-  Useful for testing or non-streaming scenarios.
   """
   @spec parse_response(String.t()) :: [map()]
-  def parse_response(response) do
-    Logger.debug("HarmonyParser.parse_response input: #{inspect(response)}")
-
-    # Split by <|start|> and parse each message segment
-    segments = String.split(response, "<|start|>", trim: true)
-    Logger.debug("Segments after split: #{inspect(segments)}")
-
-    messages =
-      segments
-      |> Enum.map(&parse_message_segment/1)
-      |> Enum.reject(&is_nil/1)
-
-    Logger.debug("Parsed messages: #{inspect(messages)}")
-    messages
-  end
-
-  @doc """
-  Parse a single message segment.
-  """
-  @spec parse_message_segment(String.t()) :: map() | nil
-  def parse_message_segment(segment) do
-    Logger.debug("parse_message_segment input: #{inspect(segment)}")
-
-    unless String.contains?(segment, "<|message|>") do
-      Logger.debug("No <|message|> in segment")
-      nil
-    else
-      [raw_header, raw_content] = String.split(segment, "<|message|>", parts: 2)
-      header = String.trim(raw_header)
-      raw_content = String.trim(raw_content)
-
-      {role, channel, recipient, content_type} = parse_header(header)
-
-      {role, channel} =
-        cond do
-          role in ["analysis", "commentary", "final"] and is_nil(channel) ->
-            {"assistant", role}
-
-          true ->
-            {role, channel}
-        end
-
-      {content, stop_token} = extract_stop_token(raw_content)
-
-      type =
-        cond do
-          stop_token == :call -> :tool_call
-          recipient -> :tool_call
-          stop_token == :return -> :final_response
-          true -> :message
-        end
-
-      message = %{
-        role: role,
-        channel: channel,
-        content: String.trim(content),
-        recipient: recipient,
-        content_type: content_type,
-        type: type
-      }
-
-      Logger.debug("Parsed message: #{inspect(message)}")
-      message
+  def parse_response(text) when is_binary(text) do
+    case message_list(text) do
+      {:ok, messages, _rest, _ctx, _loc, _offset} -> messages
+      {:error, reason, _rest, _ctx, _loc, _offset} ->
+        Logger.debug("HarmonyParser error: #{inspect(reason)}")
+        []
     end
   end
 
   @doc """
-  Processes incoming text chunk and extracts any complete messages.
+  Processes streaming text, accumulating complete messages and keeping remainder in the buffer.
   """
   @spec process_text(%__MODULE__{}, String.t()) :: %__MODULE__{}
-  def process_text(%__MODULE__{} = parser, text) do
-    new_buffer = parser.buffer <> text
-    {messages, remaining_buffer} = extract_complete_messages(new_buffer, parser.messages)
-    %{parser | buffer: remaining_buffer, messages: messages}
+  def process_text(%__MODULE__{} = parser, chunk) do
+    buffer = parser.buffer <> chunk
+
+    case message_list(buffer) do
+      {:ok, messages, rest, _ctx, _loc, _offset} ->
+        %{parser | buffer: rest, messages: parser.messages ++ messages}
+
+      {:error, _reason, _rest, _ctx, _loc, _offset} ->
+        # Keep buffer intact if we cannot parse yet (likely incomplete data)
+        %{parser | buffer: buffer}
+    end
   end
 
   @doc """
-  Returns completed messages and resets the parser's message list.
+  Returns completed messages and resets the internal list.
   """
   @spec get_completed_messages(%__MODULE__{}) :: {[map()], %__MODULE__{}}
   def get_completed_messages(%__MODULE__{} = parser) do
@@ -132,101 +82,112 @@ defmodule LangChain.Utils.HarmonyParser do
   end
 
   @doc """
-  Checks if there are any completed messages.
+  Checks if there are any completed messages ready to be consumed.
   """
   @spec has_completed_messages?(%__MODULE__{}) :: boolean()
-  def has_completed_messages?(%__MODULE__{} = parser) do
-    parser.messages != []
+  def has_completed_messages?(%__MODULE__{} = parser), do: parser.messages != []
+
+  # ---------- NimbleParsec definitions ----------
+
+  whitespace = ignore(repeat(ascii_char([?\s, ?\t])))
+  bare_token = ascii_string([not: ?<, not: ?\s], min: 1)
+
+  header =
+    tag(bare_token, :role)
+    |> optional(ignore(string(@channel)) |> tag(bare_token, :channel))
+    |> optional(whitespace |> ignore(string("to=")) |> tag(bare_token, :recipient))
+    |> optional(whitespace |> ignore(string(@constrain)) |> tag(bare_token, :content_type))
+    |> reduce({__MODULE__, :normalize_header, []})
+
+  stop_tag = choice([string(@call), string(@return), string(@end_token)])
+
+  content =
+    repeat(
+      lookahead_not(stop_tag)
+      |> utf8_char([])
+    )
+    |> reduce({List, :to_string, []})
+    |> tag(:content)
+
+  stop_token =
+    choice([
+      string(@call) |> replace(:call),
+      string(@return) |> replace(:return),
+      string(@end_token) |> replace(:end)
+    ])
+    |> tag(:stop)
+
+  message =
+    ignore(string(@start))
+    |> concat(header)
+    |> ignore(string(@message))
+    |> concat(content)
+    |> optional(stop_token)
+    |> reduce({__MODULE__, :build_message, []})
+
+  defparsec(:message_list, repeat(message))
+
+  # ---------- Reducers ----------
+
+  def normalize_header(parts) do
+    parts
+    |> Enum.into(%{})
+    |> Map.put_new(:channel, nil)
+    |> Map.put_new(:recipient, nil)
+    |> Map.put_new(:content_type, nil)
   end
 
-  @doc """
-  Extracts complete messages from the buffer.
-  """
-  @spec extract_complete_messages(String.t(), [map()]) :: {[map()], String.t()}
-  def extract_complete_messages(buffer, messages) do
-    case String.split(buffer, "<|end|>", parts: 2) do
-      [complete_part, rest] ->
-        complete_segment = complete_part <> "<|end|>"
+  def build_message(parts) do
+    {header_map, rest} =
+      case Enum.split_with(parts, &is_map/1) do
+        {[%{} = header | _], tail} -> {header, tail}
+        {_, tail} -> {%{}, tail}
+      end
 
-        case parse_message_segment(complete_segment) do
-          nil ->
-            # Skip invalid segments
-            extract_complete_messages(rest, messages)
+    attrs =
+      Enum.reduce(rest, header_map, fn
+        {:content, c}, acc -> Map.put(acc, :content, c)
+        {:stop, s}, acc -> Map.put(acc, :stop, s)
+        {:channel, c}, acc -> Map.put(acc, :channel, c)
+        {:role, r}, acc -> Map.put(acc, :role, r)
+        {:recipient, r}, acc -> Map.put(acc, :recipient, r)
+        {:content_type, ct}, acc -> Map.put(acc, :content_type, ct)
+        _, acc -> acc
+      end)
 
-          message ->
-            extract_complete_messages(rest, messages ++ [message])
-        end
+    role = normalize(attrs.role, "assistant")
+    channel = normalize(attrs.channel, nil)
+    recipient = normalize(attrs.recipient, nil)
+    content_type = normalize(attrs.content_type, nil)
+    stop = normalize_stop(attrs[:stop])
 
-      [_] ->
-        {messages, buffer}
-    end
+    {role, channel} =
+      if role in ["analysis", "commentary", "final"] and is_nil(channel),
+        do: {"assistant", role},
+        else: {role, channel}
+
+    type =
+      cond do
+        stop == :call or not is_nil(recipient) -> :tool_call
+        stop == :return -> :final_response
+        true -> :message
+      end
+
+    %{
+      role: role,
+      channel: channel,
+      recipient: recipient,
+      content_type: content_type,
+      content: attrs.content |> normalize("") |> String.trim(),
+      type: type
+    }
   end
 
-  # Helper functions
+  defp normalize(nil, default), do: default
+  defp normalize(value, _default) when is_list(value), do: value |> Enum.join()
+  defp normalize(value, _default), do: value
 
-  @doc """
-  Extracts content after a token in the buffer.
-  """
-  @spec extract_after_token(String.t(), String.t()) :: {String.t(), String.t()}
-  def extract_after_token(buffer, token) do
-    case String.split(buffer, token, parts: 2) do
-      [_, after_token] ->
-        trimmed = String.trim(after_token)
-
-        case String.split(trimmed, " ", parts: 2) do
-          [first] -> {first, ""}
-          [first, rest] -> {first, " " <> rest}
-        end
-
-      [_] ->
-        {"", String.trim(buffer)}
-    end
-  end
-
-  @doc """
-  Removes a token from the buffer.
-  """
-  @spec remove_token(String.t(), String.t()) :: String.t()
-  def remove_token(buffer, token) do
-    String.replace(buffer, token, "", global: false)
-  end
-
-  defp parse_header(header) do
-    captures = Regex.named_captures(@header_regex, String.trim(header)) || %{}
-
-    role = normalize_field(captures["role"]) || "assistant"
-    channel = normalize_field(captures["channel"])
-    recipient = normalize_field(captures["recipient"])
-    content_type = normalize_field(captures["content_type"])
-
-    {role, channel, recipient, content_type}
-  end
-
-  defp extract_stop_token(content) do
-    trimmed = String.trim(content)
-
-    cond do
-      String.ends_with?(trimmed, "<|call|>") ->
-        {strip_terminal_token(trimmed, "<|call|>"), :call}
-
-      String.ends_with?(trimmed, "<|return|>") ->
-        {strip_terminal_token(trimmed, "<|return|>"), :return}
-
-      String.ends_with?(trimmed, "<|end|>") ->
-        {strip_terminal_token(trimmed, "<|end|>"), :end}
-
-      true ->
-        {trimmed, :none}
-    end
-  end
-
-  defp strip_terminal_token(content, token) do
-    content
-    |> String.trim_trailing(token)
-    |> String.trim()
-  end
-
-  defp normalize_field(nil), do: nil
-  defp normalize_field(""), do: nil
-  defp normalize_field(value), do: String.trim(value)
+  defp normalize_stop([value]) when is_atom(value), do: value
+  defp normalize_stop(value) when is_atom(value), do: value
+  defp normalize_stop(_), do: nil
 end

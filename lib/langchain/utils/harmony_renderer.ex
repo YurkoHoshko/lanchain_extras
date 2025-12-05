@@ -414,22 +414,10 @@ defmodule LangChain.Utils.HarmonyRenderer do
   """
   @spec filter_final_messages([Message.t()], boolean()) ::
           {[Message.t()], %{discarded_messages: integer(), discarded_tokens: integer()}}
-  def filter_final_messages(messages, show_reasoning \\ false) do
-    {filtered, discarded} =
-      Enum.split_with(messages, fn message ->
-        # Keep messages that are NOT assistant messages in "analysis" channel (unless show_reasoning is true)
-        not (message.role == :assistant and get_channel(message) == "analysis" and
-               not show_reasoning)
-      end)
-
-    discarded_count = length(discarded)
-
-    discarded_tokens =
-      Enum.reduce(discarded, 0, fn msg, acc ->
-        acc + estimate_tokens(message_to_harmony(msg))
-      end)
-
-    {filtered, %{discarded_messages: discarded_count, discarded_tokens: discarded_tokens}}
+  def filter_final_messages(messages, _show_reasoning \\ false) do
+    # No channel-based filtering: return messages exactly as provided.
+    discarded_stats = %{discarded_messages: 0, discarded_tokens: 0}
+    {messages, discarded_stats}
   end
 
   @doc """

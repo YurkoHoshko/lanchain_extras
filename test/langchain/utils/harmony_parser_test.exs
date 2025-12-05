@@ -6,13 +6,8 @@ defmodule LangChain.Utils.HarmonyParserTest do
     test "creates parser with initial state" do
       parser = HarmonyParser.new()
 
-      assert parser.current_role == nil
-      assert parser.current_channel == nil
-      assert parser.current_content == nil
       assert parser.buffer == ""
       assert parser.messages == []
-      assert parser.in_message == false
-      assert parser.parsing_header == false
     end
   end
 
@@ -129,26 +124,6 @@ defmodule LangChain.Utils.HarmonyParserTest do
       assert msg2.channel == "final"
       assert msg2.content == "World"
       assert msg2.type == :final_response
-    end
-  end
-
-  describe "extract_after_token/2" do
-    test "extracts content after token" do
-      buffer = "assistant<|message|>Hello world"
-      assert HarmonyParser.extract_after_token(buffer, "<|message|>") == {"Hello", " world"}
-    end
-
-    test "handles end of buffer" do
-      buffer = "assistant<|message|>Hello"
-      assert HarmonyParser.extract_after_token(buffer, "<|message|>") == {"Hello", ""}
-    end
-  end
-
-  describe "remove_token/1" do
-    test "removes first occurrence of token" do
-      buffer = "start<|end|>content<|end|>"
-      result = HarmonyParser.remove_token(buffer, "<|end|>")
-      assert result == "startcontent<|end|>"
     end
   end
 end

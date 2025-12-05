@@ -393,38 +393,8 @@ defmodule LangChain.ChatModels.ChatLlamaJinja do
   """
   @spec combine_assistant_messages([Message.t()]) :: [Message.t()]
   def combine_assistant_messages(messages) do
-    filtered =
-      Enum.reject(messages, fn
-        %Message{metadata: %{channel: "analysis"}} -> true
-        _ -> false
-      end)
-
-    cond do
-      filtered != [] ->
-        filtered
-
-      # Only analysis messages present: promote the last one to final
-      messages != [] ->
-        messages
-        |> Enum.reverse()
-        |> Enum.find(fn %Message{metadata: meta} ->
-          match?(%{channel: "analysis"}, meta)
-        end)
-        |> case do
-          nil ->
-            messages
-
-          %Message{} = analysis_msg ->
-            promoted =
-              analysis_msg
-              |> Map.update(:metadata, %{}, fn meta -> Map.drop(meta, [:channel]) end)
-
-            [promoted]
-        end
-
-      true ->
-        []
-    end
+    # Preserve messages exactly as returned by the model; callers can decide how to handle channels.
+    messages
   end
 
   @doc """
